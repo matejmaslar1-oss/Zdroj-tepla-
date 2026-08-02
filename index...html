@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="sk">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Poradca pri výbere zdroja tepla</title>
+<meta name="description" content="Interaktívna kalkulačka a poradca pri výbere vykurovania pre rodinný dom na Slovensku." />
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink: '#141b24', slate2: '#1e2a38', steel: '#31465c', frost: '#7fa8c9',
+          ember: '#e8703a', emberdark: '#c4551f', copper: '#b8712f', cream: '#f6f3ec',
+          moss: '#3f9d6d', warn: '#e0b02a',
+        },
+        fontFamily: {
+          display: ['"Space Grotesk"', 'system-ui', 'sans-serif'],
+          body: ['Inter', 'system-ui', 'sans-serif'],
+          mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+        },
+      },
+    },
+  }
+</script>
+<style>
+  body { background:#141b24; color:#f6f3ec; font-family:Inter,system-ui,sans-serif; margin:0; }
+  .radiant-bg {
+    background:
+      radial-gradient(120% 80% at 50% -10%, rgba(232,112,58,0.14), transparent 55%),
+      radial-gradient(90% 70% at 90% 110%, rgba(127,168,201,0.10), transparent 60%),
+      #141b24;
+    min-height:100vh;
+  }
+  input[type='range'] { -webkit-appearance:none; appearance:none; height:4px; border-radius:999px; background:#31465c; outline:none; width:100%; }
+  input[type='range']::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:20px; height:20px; border-radius:50%; background:#e8703a; cursor:pointer; border:3px solid #141b24; box-shadow:0 0 0 1px #e8703a; }
+  input[type='range']::-moz-range-thumb { width:20px; height:20px; border-radius:50%; background:#e8703a; cursor:pointer; border:3px solid #141b24; }
+  .fade-up { animation:fadeUp .4s ease both; }
+  @keyframes fadeUp { from { opacity:0; transform:translateY(8px);} to { opacity:1; transform:translateY(0);} }
+  @media (prefers-reduced-motion: reduce) { * { animation-duration:.001ms !important; transition-duration:.001ms !important; } }
+  input[type=number]::-webkit-inner-spin-button { opacity:.4; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/htm@3.1.1/dist/htm.umd.js" crossorigin></script>
+
+<script>
+const { useState, useMemo, createElement } = React
+const html = htm.bind(createElement)
+
+// =============================================================
+//  CENTRÁLNY CENNÍK A PARAMETRE  (uprav ceny/dotácie tu)
+// =============================================================
+const ENERGY_PRICES = {
+  electricity_high: 0.22, electricity_low: 0.16,
+  gas: 0.11, pellets: 0.075, wood: 0.045,
+}
+const CO2_FACTORS = { electricity: 0.157, gas: 0.202, pellets: 0.025, wood: 0.02 }
+
+const CLIMATE_ZONES = [
+  { id:'z1', label:'Nížina (Podunajsko, nížiny)', te:-11, ddDays:3200 },
+  { id:'z2', label:'Bežná oblasť (väčšina SR)', te:-12, ddDays:3400 },
+  { id:'z3', label:'Vyššia poloha (400–600 m n.m.)', te:-15, ddDays:3800 },
+  { id:'z4', label:'Podhorská oblasť (600–900 m n.m.)', te:-17, ddDays:4200 },
+  { id:'z5', label:'Horská oblasť (900+ m n.m.)', te:-18, ddDays:4600 },
+]
+const INDOOR_TEMP = 20
+const DHW_PER_PERSON = 600
+const DHW_BATH_MULTIPLIER = 1.25
+
+const HEAT_SOURCES = {
+  hp_air: { id:'hp_air', name:'Tepelné čerpadlo vzduch–voda', short:'TČ vzduch–voda', fuel:'electricity', scopFloor:4.2, scopRadiator:3.2, capexBase:4000, capexPerKw:1100, servicePerYear:150, cooling:true, needsChimney:false, manual:false },
+  hp_ground: { id:'hp_ground', name:'Tepelné čerpadlo zem/voda–voda', short:'TČ zem/voda–voda', fuel:'electricity', scopFloor:5.3, scopRadiator:4.5, capexBase:9000, capexPerKw:1600, servicePerYear:120, cooling:true, needsChimney:false, manual:false },
+  gas_condens: { id:'gas_condens', name:'Kondenzačný plynový kotol', short:'Plynový kondenzačný', fuel:'gas', efficiency:0.95, capexBase:3200, capexPerKw:90, servicePerYear:130, cooling:false, needsChimney:true, manual:false },
+  pellets: { id:'pellets', name:'Kotol na pelety', short:'Peletový kotol', fuel:'pellets', efficiency:0.88, capexBase:6500, capexPerKw:120, servicePerYear:180, cooling:false, needsChimney:true, manual:true },
+  wood_gasif: { id:'wood_gasif', name:'Splyňovací kotol na drevo', short:'Splyňovanie dreva', fuel:'wood', efficiency:0.85, capexBase:5500, capexPerKw:110, servicePerYear:120, cooling:false, needsChimney:true, manual:true },
+  electric: { id:'electric', name:'Elektrický kotol / priamotop', short:'Elektrokotol', fuel:'electricity', efficiency:0.99, capexBase:1500, capexPerKw:60, servicePerYear:40, cooling:false, needsChimney:false, manual:false },
+  hp_pv: { id:'hp_pv', name:'Tepelné čerpadlo + Fotovoltika', short:'TČ + FVE', fuel:'electricity', scopFloor:4.2, scopRadiator:3.2, capexBase:9500, capexPerKw:1100, pvSelfConsumption:0.30, servicePerYear:170, cooling:true, needsChimney:false, manual:false },
+}
+const SUBSIDIES = { hp_air:3400, hp_ground:4500, pellets:1500, hp_pv:3400, wood_gasif:0, gas_condens:0, electric:0 }
+const BASE_HEAT_LOSS = { novostavba:45, rekonstrukcia:80, stary:130 }
+
+// =============================================================
+//  VÝPOČTOVÁ LOGIKA – energia
+// =============================================================
+const WALL_MOD = { none:45, cm10:15, cm15:5, cm20:-8 }
+const ROOF_MOD = { none:25, basic:8, top:-4 }
+const WINDOW_MOD = { old:20, double:4, triple:-6 }
+
+function specificHeatLoss(inp) {
+  const base = BASE_HEAT_LOSS[inp.buildingState] ?? 100
+  const wall = WALL_MOD[inp.wallInsulation] ?? 0
+  const roof = ROOF_MOD[inp.roofInsulation] ?? 0
+  const win = WINDOW_MOD[inp.windows] ?? 0
+  const floorsFactor = inp.floors >= 2 ? 0.94 : 1.0
+  let v = (base + wall + roof + win) * floorsFactor
+  return Math.max(20, Math.min(170, Math.round(v)))
+}
+function getZone(id) { return CLIMATE_ZONES.find(z => z.id === id) ?? CLIMATE_ZONES[1] }
+function designHeatLoad(inp) {
+  const zone = getZone(inp.climateZone)
+  const wPerM2 = specificHeatLoss(inp)
+  const refDelta = INDOOR_TEMP - (-12)
+  const zoneDelta = INDOOR_TEMP - zone.te
+  const kw = (wPerM2 * inp.area * (zoneDelta / refDelta)) / 1000
+  return Math.max(2, Math.round(kw * 10) / 10)
+}
+function annualHeatingDemand(inp) {
+  const zone = getZone(inp.climateZone)
+  const totalW = specificHeatLoss(inp) * inp.area
+  const deltaT = INDOOR_TEMP - zone.te
+  return Math.round((totalW / deltaT) * zone.ddDays * 0.024 * 0.75)
+}
+function annualDhwDemand(inp) {
+  const persons = Math.max(1, inp.persons || 1)
+  const mult = inp.waterProfile === 'bath' ? DHW_BATH_MULTIPLIER : 1
+  return Math.round(persons * DHW_PER_PERSON * mult)
+}
+function totalAnnualDemand(inp) { return annualHeatingDemand(inp) + annualDhwDemand(inp) }
+
+// =============================================================
+//  VÝPOČTOVÁ LOGIKA – financie
+// =============================================================
+function effectiveEfficiency(src, inp) {
+  const isFloor = inp.emitter === 'floor'
+  if (src.scopFloor) return isFloor ? src.scopFloor : src.scopRadiator
+  return src.efficiency
+}
+function annualInputEnergy(src, inp) { return totalAnnualDemand(inp) / effectiveEfficiency(src, inp) }
+function unitPrice(src) {
+  if (src.fuel === 'electricity') return ENERGY_PRICES.electricity_low * 0.85 + ENERGY_PRICES.electricity_high * 0.15
+  return ENERGY_PRICES[src.fuel]
+}
+function annualOpex(src, inp) {
+  let cost = annualInputEnergy(src, inp) * unitPrice(src)
+  if (src.pvSelfConsumption) cost *= (1 - src.pvSelfConsumption)
+  return Math.round(cost + src.servicePerYear)
+}
+function capex(src, inp) {
+  const kw = designHeatLoad(inp)
+  const gross = src.capexBase + src.capexPerKw * kw
+  const subsidy = SUBSIDIES[src.id] ?? 0
+  return { gross:Math.round(gross), subsidy, net:Math.max(0, Math.round(gross - subsidy)) }
+}
+function annualCo2(src, inp) {
+  let input = annualInputEnergy(src, inp)
+  if (src.pvSelfConsumption) input *= (1 - src.pvSelfConsumption)
+  return Math.round(input * (CO2_FACTORS[src.fuel] ?? 0.2))
+}
+function tco(src, inp, years) { return Math.round(capex(src, inp).net + annualOpex(src, inp) * years) }
+function tcoSeries(src, inp, maxYears) {
+  const c = capex(src, inp).net, op = annualOpex(src, inp), pts = []
+  for (let y = 0; y <= maxYears; y++) pts.push({ year:y, value:Math.round(c + op * y) })
+  return pts
+}
+function paybackVs(src, ref, inp) {
+  const extraInvest = capex(src, inp).net - capex(ref, inp).net
+  const annualSaving = annualOpex(ref, inp) - annualOpex(src, inp)
+  if (annualSaving <= 0) return null
+  if (extraInvest <= 0) return 0
+  return Math.round((extraInvest / annualSaving) * 10) / 10
+}
+function computeSourceFinance(id, inp) {
+  const src = HEAT_SOURCES[id], c = capex(src, inp), ref = HEAT_SOURCES.electric
+  return {
+    id, source:src, capexGross:c.gross, subsidy:c.subsidy, capexNet:c.net,
+    opexYear:annualOpex(src, inp), co2Year:annualCo2(src, inp),
+    inputEnergy:Math.round(annualInputEnergy(src, inp)), efficiency:effectiveEfficiency(src, inp),
+    tco10:tco(src, inp, 10), tco15:tco(src, inp, 15), payback:paybackVs(src, ref, inp),
+  }
+}
+
+// =============================================================
+//  SKÓROVANIE + OBMEDZENIA
+// =============================================================
+function evaluateConstraints(src, inp) {
+  const blockers = [], warnings = [], loss = specificHeatLoss(inp)
+  if (src.fuel === 'gas' && !inp.hasGas) blockers.push('Nie je dostupná plynová prípojka – kotol na plyn nemožno pripojiť.')
+  if (src.needsChimney && !inp.hasChimney && src.fuel !== 'gas') warnings.push('Chýba funkčný komín – nutná investícia do komína alebo odkúrenia.')
+  if (src.fuel === 'gas' && !inp.hasChimney) warnings.push('Riešiť odvod spalín (turbo odkúrenie cez stenu alebo vložka).')
+  if (src.scopFloor && inp.emitter === 'radiator' && loss > 90) warnings.push('TČ na pôvodné radiátory v slabo zateplenom dome: nízka efektivita a vysoký teplotný spád. Zvážte zateplenie alebo výmenu telies.')
+  if (src.scopFloor && !inp.hasOutdoorSpace) warnings.push('Chýba vhodné miesto pre vonkajšiu jednotku – dbajte na hlukové normy voči susedom.')
+  if (src.fuel === 'electricity' && src.scopFloor && !inp.has3Phase) warnings.push('Odporúča sa 3-fázová prípojka pre plnohodnotné TČ.')
+  if ((src.fuel === 'pellets' || src.fuel === 'wood') && !inp.hasFuelStorage) blockers.push('Chýba priestor na skladovanie paliva (pelety/drevo).')
+  if (src.id === 'hp_ground' && !inp.hasWell && !inp.hasOutdoorSpace) warnings.push('Zemné TČ vyžaduje vrt alebo plošný kolektor (potreba pozemku/studne).')
+  if (src.pvSelfConsumption) {
+    if (!inp.pvRoofArea || inp.pvRoofArea < 15) warnings.push('Malá alebo chýbajúca plocha strechy pre FVE – prínos fotovoltiky bude obmedzený.')
+    if (inp.pvOrientation === 'other') warnings.push('Nevhodná orientácia strechy pre FVE (ideál J/JV/JZ).')
+  }
+  if (src.id === 'electric' && loss > 70) warnings.push('Priama elektrina v nezateplenom dome znamená veľmi vysoké účty za kúrenie.')
+  if (src.manual && inp.comfort === 'auto') warnings.push('Vyžaduje manuálne prikladanie/čistenie – v rozpore s požiadavkou na plnú automatiku.')
+  if (inp.wantsCooling && !src.cooling) warnings.push('Tento zdroj neumožňuje letné chladenie.')
+  return { blockers, warnings }
+}
+function normLowerBetter(v, min, max) { return max === min ? 1 : 1 - (v - min) / (max - min) }
+function weightsFor(p) {
+  switch (p) {
+    case 'invest': return { capex:0.45, opex:0.2, comfort:0.2, eco:0.15 }
+    case 'operation': return { capex:0.15, opex:0.5, comfort:0.15, eco:0.2 }
+    case 'eco': return { capex:0.15, opex:0.2, comfort:0.1, eco:0.55 }
+    default: return { capex:0.3, opex:0.35, comfort:0.15, eco:0.2 }
+  }
+}
+function buildReasons(fin, src, inp, s) {
+  const r = []
+  if (s.opex > 0.7) r.push('Nízke prevádzkové náklady.')
+  if (s.capex > 0.7) r.push('Nízka počiatočná investícia.')
+  if (s.co2 > 0.7) r.push('Nízka uhlíková stopa.')
+  if (fin.subsidy > 0) r.push('Nárok na dotáciu cca ' + fin.subsidy + ' €.')
+  if (!src.manual) r.push('Plne automatická prevádzka bez prikladania.')
+  if (src.cooling && inp.wantsCooling) r.push('Umožňuje aj letné chladenie.')
+  if (src.scopFloor && inp.emitter === 'floor') r.push('Ideálna kombinácia s podlahovým vykurovaním (vysoký SCOP).')
+  if (fin.payback !== null && fin.payback > 0 && fin.payback < 10) r.push('Návratnosť voči elektrokotlu cca ' + fin.payback + ' r.')
+  return r
+}
+function scoreAllSources(inp) {
+  const ids = Object.keys(HEAT_SOURCES)
+  const finances = ids.map(id => computeSourceFinance(id, inp))
+  const cap = finances.map(f => f.capexNet), op = finances.map(f => f.opexYear), co = finances.map(f => f.co2Year)
+  const minC = Math.min(...cap), maxC = Math.max(...cap)
+  const minO = Math.min(...op), maxO = Math.max(...op)
+  const minCo = Math.min(...co), maxCo = Math.max(...co)
+  const w = weightsFor(inp.priority)
+  const results = finances.map(fin => {
+    const src = fin.source
+    const { blockers, warnings } = evaluateConstraints(src, inp)
+    const capexScore = normLowerBetter(fin.capexNet, minC, maxC)
+    const opexScore = normLowerBetter(fin.opexYear, minO, maxO)
+    const co2Score = normLowerBetter(fin.co2Year, minCo, maxCo)
+    let comfortScore = src.manual ? 0.4 : 1
+    if (inp.wantsCooling) comfortScore *= src.cooling ? 1 : 0.6
+    let score = 100 * (w.capex*capexScore + w.opex*opexScore + w.comfort*comfortScore + w.eco*co2Score)
+    score -= warnings.length * 6
+    if (inp.budget && fin.capexNet > inp.budget) score -= Math.min(35, ((fin.capexNet - inp.budget)/inp.budget) * 60)
+    if (blockers.length > 0) score = Math.min(score, 12)
+    score = Math.max(0, Math.min(100, Math.round(score)))
+    return { ...fin, score, blockers, warnings, reasons: buildReasons(fin, src, inp, { capex:capexScore, opex:opexScore, co2:co2Score }) }
+  })
+  results.sort((a, b) => b.score - a.score)
+  return results
+}
+
+// =============================================================
+//  FORMÁTOVANIE
+// =============================================================
+const fmtEur = n => new Intl.NumberFormat('sk-SK', { style:'currency', currency:'EUR', maximumFractionDigits:0 }).format(n)
+const fmtNum = n => new Intl.NumberFormat('sk-SK').format(Math.round(n))
+
+// =============================================================
+//  UI KOMPONENTY
+// =============================================================
+function Field({ label, hint, children }) {
+  return html`<label class="block mb-5">
+    <span class="block text-sm font-medium text-cream/90 mb-2">${label}</span>
+    ${children}
+    ${hint && html`<span class="block text-xs text-frost/70 mt-1.5">${hint}</span>`}
+  </label>`
+}
+function OptionGroup({ value, onChange, options, columns=2 }) {
+  const cols = { 1:'grid-cols-1', 2:'grid-cols-2', 3:'grid-cols-3', 4:'grid-cols-2 sm:grid-cols-4' }[columns]
+  return html`<div class=${'grid ' + cols + ' gap-2'}>
+    ${options.map(opt => {
+      const active = value === opt.value
+      return html`<button key=${opt.value} type="button" onClick=${() => onChange(opt.value)}
+        class=${'text-left rounded-lg border px-3.5 py-3 text-sm transition-colors ' +
+          (active ? 'border-ember bg-ember/15 text-cream' : 'border-steel/60 bg-slate2/40 text-cream/70 hover:border-frost/50 hover:text-cream')}>
+        <span class="block font-medium">${opt.label}</span>
+        ${opt.desc && html`<span class="block text-xs text-frost/60 mt-0.5">${opt.desc}</span>`}
+      </button>`
+    })}
+  </div>`
+}
+function Toggle({ value, onChange, label }) {
+  return html`<button type="button" onClick=${() => onChange(!value)}
+    class=${'flex items-center justify-between w-full rounded-lg border px-4 py-3 text-sm transition-colors ' +
+      (value ? 'border-ember/70 bg-ember/10 text-cream' : 'border-steel/60 bg-slate2/40 text-cream/70 hover:border-frost/50')}>
+    <span class="font-medium">${label}</span>
+    <span class=${'relative inline-flex h-6 w-11 items-center rounded-full transition-colors ' + (value ? 'bg-ember' : 'bg-steel')}>
+      <span class=${'inline-block h-4 w-4 transform rounded-full bg-cream transition-transform ' + (value ? 'translate-x-6' : 'translate-x-1')}></span>
+    </span>
+  </button>`
+}
+function Slider({ value, onChange, min, max, step=1, format }) {
+  return html`<div>
+    <div class="flex items-center justify-between mb-2"><span class="font-mono text-lg text-ember">${format ? format(value) : value}</span></div>
+    <input type="range" min=${min} max=${max} step=${step} value=${value} onInput=${e => onChange(Number(e.target.value))} />
+  </div>`
+}
+function NumberInput({ value, onChange, min, max, suffix }) {
+  return html`<div class="flex items-center rounded-lg border border-steel/60 bg-slate2/40 focus-within:border-ember overflow-hidden">
+    <input type="number" value=${value} min=${min} max=${max} onInput=${e => onChange(Number(e.target.value))}
+      class="flex-1 bg-transparent px-4 py-3 text-cream outline-none font-mono" style="width:100%" />
+    ${suffix && html`<span class="px-4 text-frost/70 text-sm">${suffix}</span>`}
+  </div>`
+}
+function Card({ children, className='' }) {
+  return html`<div class=${'rounded-xl border border-steel/40 bg-slate2/40 ' + className}>${children}</div>`
+}
+
+// =============================================================
+//  KROKY WIZARDU
+// =============================================================
+function Step1({ data, set }) {
+  return html`<div class="fade-up">
+    ${Field({ label:'Klimatické pásmo / lokalita', hint:'Určuje výpočtovú vonkajšiu teplotu a dennostupne.', children:
+      OptionGroup({ columns:1, value:data.climateZone, onChange:v => set({ climateZone:v }),
+        options: CLIMATE_ZONES.map(z => ({ value:z.id, label:z.label, desc:'Výpočtová teplota ' + z.te + ' °C' })) }) })}
+    <div class="grid sm:grid-cols-2 gap-x-6">
+      ${Field({ label:'Podlahová plocha', hint:'Vykurovaná úžitková plocha.', children:
+        NumberInput({ value:data.area, onChange:v => set({ area:v }), min:20, max:800, suffix:'m²' }) })}
+      ${Field({ label:'Počet podlaží', children:
+        OptionGroup({ columns:3, value:data.floors, onChange:v => set({ floors:v }),
+          options:[{ value:1, label:'1' },{ value:2, label:'2' },{ value:3, label:'3+' }] }) })}
+    </div>
+    ${Field({ label:'Stav stavby', children:
+      OptionGroup({ columns:3, value:data.buildingState, onChange:v => set({ buildingState:v }),
+        options:[{ value:'novostavba', label:'Novostavba' },{ value:'rekonstrukcia', label:'Čiast. rekonštr.' },{ value:'stary', label:'Starý pôvodný' }] }) })}
+    ${Field({ label:'Zateplenie stien', children:
+      OptionGroup({ columns:4, value:data.wallInsulation, onChange:v => set({ wallInsulation:v }),
+        options:[{ value:'none', label:'Žiadne' },{ value:'cm10', label:'10 cm' },{ value:'cm15', label:'15 cm' },{ value:'cm20', label:'20+ cm' }] }) })}
+    <div class="grid sm:grid-cols-2 gap-x-6">
+      ${Field({ label:'Zateplenie strechy', children:
+        OptionGroup({ columns:3, value:data.roofInsulation, onChange:v => set({ roofInsulation:v }),
+          options:[{ value:'none', label:'Žiadne' },{ value:'basic', label:'Základné' },{ value:'top', label:'Špičkové' }] }) })}
+      ${Field({ label:'Okná', children:
+        OptionGroup({ columns:3, value:data.windows, onChange:v => set({ windows:v }),
+          options:[{ value:'old', label:'Pôvodné' },{ value:'double', label:'Dvojsklo' },{ value:'triple', label:'Trojsklo' }] }) })}
+    </div>
+    ${Field({ label:'Typ vykurovacej sústavy', hint:'Nízkoteplotná sústava výrazne zvyšuje efektivitu tepelných čerpadiel.', children:
+      OptionGroup({ columns:2, value:data.emitter, onChange:v => set({ emitter:v }),
+        options:[{ value:'floor', label:'Podlahové', desc:'Nízkoteplotné' },{ value:'radiator', label:'Radiátory', desc:'Vysokoteplotné' }] }) })}
+  </div>`
+}
+function Step2({ data, set }) {
+  const t = (label, key) => Toggle({ label, value:data[key], onChange:v => set({ [key]:v }) })
+  return html`<div class="fade-up space-y-3">
+    <div class="grid sm:grid-cols-2 gap-3">
+      ${t('Dostupná plynová prípojka','hasGas')}
+      ${t('3-fázová elektrina','has3Phase')}
+      ${t('Funkčný komín','hasChimney')}
+      ${t('Sklad paliva (drevo/pelety)','hasFuelStorage')}
+      ${t('Miesto pre vonkajšiu jednotku TČ','hasOutdoorSpace')}
+      ${t('Výdatná studňa (TČ voda–voda)','hasWell')}
+    </div>
+    <div class="pt-4 border-t border-steel/40">
+      <p class="text-sm font-semibold text-cream/90 mb-4">Strecha pre fotovoltiku (FVE)</p>
+      <div class="grid sm:grid-cols-2 gap-x-6">
+        ${Field({ label:'Orientácia strechy', children:
+          OptionGroup({ columns:4, value:data.pvOrientation, onChange:v => set({ pvOrientation:v }),
+            options:[{ value:'S', label:'Juh' },{ value:'JV', label:'JV' },{ value:'JZ', label:'JZ' },{ value:'other', label:'Iná' }] }) })}
+        ${Field({ label:'Využiteľná plocha strechy', hint:'Približná plocha pre panely.', children:
+          NumberInput({ value:data.pvRoofArea, onChange:v => set({ pvRoofArea:v }), min:0, max:200, suffix:'m²' }) })}
+      </div>
+    </div>
+  </div>`
+}
+function Step3({ data, set }) {
+  return html`<div class="fade-up">
+    ${Field({ label:'Počet členov domácnosti', hint:'Ovplyvňuje ročnú spotrebu teplej vody.', children:
+      Slider({ value:data.persons, onChange:v => set({ persons:v }), min:1, max:8,
+        format:v => v + ' ' + (v === 1 ? 'osoba' : v < 5 ? 'osoby' : 'osôb') }) })}
+    ${Field({ label:'Typické využívanie teplej vody', children:
+      OptionGroup({ columns:2, value:data.waterProfile, onChange:v => set({ waterProfile:v }),
+        options:[{ value:'shower', label:'Prevažne sprcha', desc:'Nižšia spotreba' },{ value:'bath', label:'Prevažne vaňa', desc:'Vyššia spotreba' }] }) })}
+  </div>`
+}
+function Step4({ data, set }) {
+  return html`<div class="fade-up">
+    ${Field({ label:'Maximálny investičný rozpočet', hint:'Vrátane montáže. Prekročenie znižuje skóre riešenia.', children:
+      Slider({ value:data.budget, onChange:v => set({ budget:v }), min:2000, max:30000, step:500, format:v => fmtEur(v) }) })}
+    ${Field({ label:'Požadovaný komfort obsluhy', children:
+      OptionGroup({ columns:2, value:data.comfort, onChange:v => set({ comfort:v }),
+        options:[{ value:'auto', label:'100 % automatika', desc:'Bez prikladania' },{ value:'manual', label:'Ochota prikladať', desc:'Drevo/pelety OK' }] }) })}
+    ${Field({ label:'Letné chladenie', children:
+      Toggle({ label:'Chcem využívať aj chladenie v lete', value:data.wantsCooling, onChange:v => set({ wantsCooling:v }) }) })}
+    ${Field({ label:'Hlavná priorita', hint:'Nastaví váhy v hodnotiacom algoritme.', children:
+      OptionGroup({ columns:3, value:data.priority, onChange:v => set({ priority:v }),
+        options:[{ value:'invest', label:'Najnižšia investícia' },{ value:'operation', label:'Najnižšia prevádzka' },{ value:'eco', label:'Ekológia' }] }) })}
+  </div>`
+}
+
+// =============================================================
+//  GRAF TCO (čisté SVG)
+// =============================================================
+const LINE_COLORS = ['#e8703a','#7fa8c9','#3f9d6d','#e0b02a','#b8712f','#a68cff','#ef6b8a']
+function TcoChart({ results, inputs, chartIds }) {
+  const W = 640, H = 300, padL = 46, padR = 12, padT = 12, padB = 28
+  const series = results.filter(r => chartIds.includes(r.id)).map(r => ({
+    id:r.id, idx:results.findIndex(x => x.id === r.id), pts:tcoSeries(r.source, inputs, 15),
+  }))
+  let maxV = 0
+  series.forEach(s => s.pts.forEach(p => { if (p.value > maxV) maxV = p.value }))
+  maxV = Math.ceil(maxV / 5000) * 5000 || 5000
+  const x = y => padL + (y / 15) * (W - padL - padR)
+  const yv = v => padT + (1 - v / maxV) * (H - padT - padB)
+  const gridY = []
+  for (let i = 0; i <= 5; i++) { const val = (maxV / 5) * i; gridY.push({ val, y:yv(val) }) }
+  return html`<svg viewBox=${'0 0 ' + W + ' ' + H} class="w-full" style="max-height:320px">
+    ${gridY.map(g => html`<g key=${g.val}>
+      <line x1=${padL} y1=${g.y} x2=${W - padR} y2=${g.y} stroke="#31465c" stroke-width="1" stroke-dasharray="3 3" />
+      <text x=${padL - 6} y=${g.y + 4} text-anchor="end" fill="#7fa8c9" font-size="11" font-family="monospace">${Math.round(g.val/1000)}k</text>
+    </g>`)}
+    ${[0,3,6,9,12,15].map(yr => html`<text key=${yr} x=${x(yr)} y=${H - 8} text-anchor="middle" fill="#7fa8c9" font-size="11" font-family="monospace">${yr}</text>`)}
+    ${series.map(s => {
+      const d = s.pts.map((p, i) => (i === 0 ? 'M' : 'L') + x(p.year) + ' ' + yv(p.value)).join(' ')
+      return html`<path key=${s.id} d=${d} fill="none" stroke=${LINE_COLORS[s.idx % LINE_COLORS.length]} stroke-width="2" />`
+    })}
+  </svg>`
+}
+
+function ScoreRing({ score }) {
+  const color = score >= 70 ? '#3f9d6d' : score >= 45 ? '#e0b02a' : '#e8703a'
+  const dash = (score / 100) * 138
+  return html`<div class="relative w-16 h-16 shrink-0">
+    <svg viewBox="0 0 50 50" class="w-16 h-16" style="transform:rotate(-90deg)">
+      <circle cx="25" cy="25" r="22" fill="none" stroke="#31465c" stroke-width="4" />
+      <circle cx="25" cy="25" r="22" fill="none" stroke=${color} stroke-width="4" stroke-dasharray=${dash + ' 200'} stroke-linecap="round" />
+    </svg>
+    <div class="absolute inset-0 flex items-center justify-center"><span class="font-mono text-lg font-semibold" style=${{ color }}>${score}</span></div>
+  </div>`
+}
+
+function Dashboard({ inputs, onRestart }) {
+  const results = useMemo(() => scoreAllSources(inputs), [inputs])
+  const top3 = results.slice(0, 3)
+  const [chartIds, setChartIds] = useState(top3.map(r => r.id))
+  const toggleChart = id => setChartIds(cur => cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id])
+  const stat = (label, value) => html`<div><p class="text-xs text-frost/60 mb-1">${label}</p><p class="font-display text-xl font-semibold">${value}</p></div>`
+  const mini = (label, value) => html`<div class="rounded-lg bg-ink/40 px-3 py-2"><p class="text-[11px] text-frost/60 leading-tight mb-0.5">${label}</p><p class="font-mono text-sm text-cream">${value}</p></div>`
+
+  return html`<div class="space-y-8 fade-up">
+    ${Card({ className:'p-5', children: html`<div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        ${stat('Merná strata', specificHeatLoss(inputs) + ' W/m²')}
+        ${stat('Návrhový výkon', designHeatLoad(inputs) + ' kW')}
+        ${stat('Kúrenie / rok', fmtNum(annualHeatingDemand(inputs)) + ' kWh')}
+        ${stat('TÚV / rok', fmtNum(annualDhwDemand(inputs)) + ' kWh')}
+      </div>
+      <p class="text-xs text-frost/60 mt-3">Celková ročná potreba užitočného tepla: ${fmtNum(totalAnnualDemand(inputs))} kWh. Hodnoty sú orientačný odhad.</p>
+    </div>` })}
+
+    <div>
+      <h2 class="font-display text-xl font-semibold mb-1">Odporúčané riešenia</h2>
+      <p class="text-sm text-frost/70 mb-4">Zoradené podľa vhodnosti pre váš dom a priority.</p>
+      <div class="space-y-4">
+        ${top3.map((r, i) => Card({ className:'p-5', children: html`<div class="flex items-start gap-4">
+          ${ScoreRing({ score:r.score })}
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="text-xs font-mono text-ember">#${i + 1}</span>
+              <h3 class="font-display text-lg font-semibold">${r.source.name}</h3>
+            </div>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3 mb-3">
+              ${mini('Investícia (po dotácii)', fmtEur(r.capexNet))}
+              ${mini('Prevádzka / rok', fmtEur(r.opexYear))}
+              ${mini('TCO 15 r.', fmtEur(r.tco15))}
+              ${mini('CO₂ / rok', fmtNum(r.co2Year) + ' kg')}
+            </div>
+            ${r.reasons.length > 0 && html`<ul class="space-y-1 mb-2">
+              ${r.reasons.map((reason, j) => html`<li key=${j} class="text-sm text-cream/80 flex gap-2"><span class="text-moss">✓</span>${reason}</li>`)}
+            </ul>`}
+            ${r.warnings.map((w, j) => html`<p key=${'w'+j} class="text-sm text-warn/90 flex gap-2"><span>⚠</span>${w}</p>`)}
+            ${r.blockers.map((b, j) => html`<p key=${'b'+j} class="text-sm text-ember flex gap-2"><span>✕</span>${b}</p>`)}
+          </div>
+        </div>` }))}
+      </div>
+    </div>
+
+    ${Card({ className:'p-5', children: html`<div>
+      <h2 class="font-display text-xl font-semibold mb-1">Vývoj celkových nákladov (TCO)</h2>
+      <p class="text-sm text-frost/70 mb-4">Investícia + prevádzka v čase (0–15 rokov). Kliknutím prepínate zdroje.</p>
+      <div class="flex flex-wrap gap-2 mb-4">
+        ${results.map((r, i) => {
+          const on = chartIds.includes(r.id)
+          return html`<button key=${r.id} onClick=${() => toggleChart(r.id)}
+            class=${'text-xs px-3 py-1.5 rounded-full border transition-colors ' + (on ? 'border-transparent text-ink font-medium' : 'border-steel/60 text-cream/60')}
+            style=${on ? { backgroundColor: LINE_COLORS[i % LINE_COLORS.length] } : {}}>${r.source.short}</button>`
+        })}
+      </div>
+      ${TcoChart({ results, inputs, chartIds })}
+    </div>` })}
+
+    ${Card({ className:'p-5 overflow-x-auto', children: html`<div>
+      <h2 class="font-display text-xl font-semibold mb-4">Porovnanie všetkých zdrojov</h2>
+      <table class="w-full text-sm" style="min-width:640px">
+        <thead><tr class="text-left text-frost/70 border-b border-steel/40">
+          <th class="py-2 pr-4 font-medium">Zdroj</th>
+          <th class="py-2 px-3 font-medium text-right">Skóre</th>
+          <th class="py-2 px-3 font-medium text-right">Investícia</th>
+          <th class="py-2 px-3 font-medium text-right">Prevádzka/r.</th>
+          <th class="py-2 px-3 font-medium text-right">TCO 10 r.</th>
+          <th class="py-2 px-3 font-medium text-right">TCO 15 r.</th>
+          <th class="py-2 px-3 font-medium text-right">CO₂/r.</th>
+          <th class="py-2 px-3 font-medium text-right">Návratnosť</th>
+        </tr></thead>
+        <tbody>
+          ${results.map(r => html`<tr key=${r.id} class="border-b border-steel/20 hover:bg-slate2/40">
+            <td class="py-2.5 pr-4 font-medium">${r.source.short}</td>
+            <td class="py-2.5 px-3 text-right font-mono">${r.score}</td>
+            <td class="py-2.5 px-3 text-right font-mono">${fmtEur(r.capexNet)}</td>
+            <td class="py-2.5 px-3 text-right font-mono">${fmtEur(r.opexYear)}</td>
+            <td class="py-2.5 px-3 text-right font-mono">${fmtEur(r.tco10)}</td>
+            <td class="py-2.5 px-3 text-right font-mono">${fmtEur(r.tco15)}</td>
+            <td class="py-2.5 px-3 text-right font-mono text-frost/80">${fmtNum(r.co2Year)} kg</td>
+            <td class="py-2.5 px-3 text-right font-mono text-frost/80">${r.payback === null ? '—' : r.payback === 0 ? 'ihneď' : r.payback + ' r.'}</td>
+          </tr>`)}
+        </tbody>
+      </table>
+      <p class="text-xs text-frost/50 mt-3">Návratnosť je počítaná voči elektrokotlu (referencia).</p>
+    </div>` })}
+
+    <div class="flex justify-center pt-2">
+      <button onClick=${onRestart} class="px-6 py-3 rounded-lg border border-steel/60 text-cream/80 hover:border-ember hover:text-cream transition-colors">← Zmeniť vstupy</button>
+    </div>
+  </div>`
+}
+
+// =============================================================
+//  APP
+// =============================================================
+const DEFAULT_INPUTS = {
+  climateZone:'z2', area:120, floors:1, buildingState:'rekonstrukcia',
+  wallInsulation:'cm10', roofInsulation:'basic', windows:'double', emitter:'radiator',
+  hasGas:true, has3Phase:true, hasChimney:true, hasFuelStorage:false,
+  hasOutdoorSpace:true, hasWell:false, pvOrientation:'S', pvRoofArea:30,
+  persons:4, waterProfile:'shower',
+  budget:12000, comfort:'auto', wantsCooling:false, priority:'operation',
+}
+const STEPS = [
+  { title:'Objekt a lokalita', component:Step1 },
+  { title:'Infraštruktúra', component:Step2 },
+  { title:'Domácnosť a TÚV', component:Step3 },
+  { title:'Financie a priority', component:Step4 },
+]
+
+function App() {
+  const [inputs, setInputs] = useState(DEFAULT_INPUTS)
+  const [step, setStep] = useState(0)
+  const [showResults, setShowResults] = useState(false)
+  const set = patch => setInputs(cur => ({ ...cur, ...patch }))
+  const StepComponent = STEPS[step].component
+  const isLast = step === STEPS.length - 1
+
+  return html`<div class="radiant-bg">
+    <div class="max-w-3xl mx-auto px-4 py-8 sm:py-12">
+      <header class="mb-8">
+        <div class="flex items-center gap-2 text-ember text-xs font-mono uppercase tracking-widest mb-2">
+          <span class="w-8 h-px bg-ember"></span> Poradca vykurovania
+        </div>
+        <h1 class="font-display text-3xl sm:text-4xl font-bold leading-tight">Aký zdroj tepla<br/><span class="text-ember">pre váš dom?</span></h1>
+        <p class="text-frost/70 mt-3 max-w-lg">Zadajte parametre domu a preferencie. Nástroj odhadne tepelnú stratu, spočíta náklady na 15 rokov a odporučí najvhodnejšie riešenia.</p>
+      </header>
+
+      ${!showResults ? html`<div>
+        <div class="flex items-center gap-2 mb-6">
+          ${STEPS.map((s, i) => html`<button key=${i} onClick=${() => i <= step && setStep(i)} class="flex-1 text-left">
+            <div class=${'h-1 rounded-full mb-2 transition-colors ' + (i <= step ? 'bg-ember' : 'bg-steel/50')}></div>
+            <span class=${'text-[11px] font-mono ' + (i === step ? 'text-ember' : 'text-frost/50')}>${String(i + 1).padStart(2,'0')} · ${s.title}</span>
+          </button>`)}
+        </div>
+        <div class="rounded-2xl border border-steel/40 bg-slate2/30 p-5 sm:p-7 mb-6">
+          ${StepComponent({ data:inputs, set })}
+        </div>
+        <div class="flex justify-between">
+          <button onClick=${() => setStep(s => Math.max(0, s - 1))} disabled=${step === 0}
+            class="px-5 py-3 rounded-lg text-cream/70 hover:text-cream disabled:opacity-30 transition-colors">← Späť</button>
+          ${isLast
+            ? html`<button onClick=${() => setShowResults(true)} class="px-7 py-3 rounded-lg bg-ember hover:bg-emberdark text-ink font-semibold transition-colors">Zobraziť odporúčania →</button>`
+            : html`<button onClick=${() => setStep(s => Math.min(STEPS.length - 1, s + 1))} class="px-7 py-3 rounded-lg bg-ember hover:bg-emberdark text-ink font-semibold transition-colors">Ďalej →</button>`}
+        </div>
+      </div>` : Dashboard({ inputs, onRestart:() => setShowResults(false) })}
+
+      <footer class="mt-12 pt-6 border-t border-steel/30 text-xs text-frost/50">
+        Orientačný nástroj. Ceny energií, dotácie a investičné náklady sú priemerné odhady — upravte ich v sekcii <span class="font-mono text-frost/70">CENTRÁLNY CENNÍK</span> v kóde. Pred rozhodnutím konzultujte projektanta.
+      </footer>
+    </div>
+  </div>`
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${App} />`)
+</script>
+</body>
+</html>
